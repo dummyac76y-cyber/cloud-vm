@@ -1,212 +1,223 @@
-# STI eLMS dashboard
+# Minecraft server
 
-A personal, read-only web dashboard for [elms.sti.edu](https://elms.sti.edu), signed in with
-**your own** account. Runs on Next.js and deploys to Vercel in one command.
+A cross-play Minecraft server: **Paper** for Java clients, **Geyser + Floodgate** so Bedrock
+players join the same world. Config, scripts and pinned versions live in git; worlds and player
+data do not.
 
-![stack](https://img.shields.io/badge/Next.js-15-000?logo=next.js) ![runtime](https://img.shields.io/badge/runtime-Node%2020%2B-2f6f4e) ![license](https://img.shields.io/badge/license-MIT-blue)
-
----
-
-## What this is
-
-STI's eLearning Management System is a [Neo LMS](https://academysoft.com/) deployment running on
-**Ruby on Rails**. Verified from the public markup:
-
-| Evidence | Conclusion |
+| | |
 | --- | --- |
-| `case-study-neo-lms-and-sti-college.png` | Neo LMS (AcademySoft) |
-| `<input name="utf8" value="✓">`, `authenticity_token`, `on_ready()` | Ruby on Rails, not PHP/Canvas |
-| `?lmsauth=<hex>` on every attachment URL | Signed file URLs |
-| No `/api/` route, no JSON in any page | **Server-rendered HTML only — no public API** |
-| `robots.txt` disallows `/log_in/`, `/info/`, `/help/` | Keep your scraper off those routes |
+| Minecraft | 26.2 |
+| Server core | Paper build 129 (STABLE channel) |
+| Java | **25 or newer** — Paper 26.1+ will not boot on anything older |
+| Cross-play | Geyser 2.11.3 (b1247) + Floodgate 2.2.5 (b141) |
+| Java clients | `25565/tcp` |
+| Bedrock clients | `19132/udp` |
 
-Because there is no API, this app parses HTML. That is the honest core constraint of the whole
-project, and the reason the DOM inspector below exists.
+26.3 exists but is beta-only, so 26.2 is what is pinned. `mc update` picks up the first STABLE
+build and never moves you onto a pre-release.
 
-## Features
-
-- **Course dashboard** — your enrolled courses on one page.
-- **Per-course detail** — assignments, announcements and grade rows as JSON.
-- **Route discovery** — reads the real in-app links out of your navigation, so you never have to
-  guess URLs.
-- **DOM inspector** — renders any authenticated eLMS page as escaped source, so fixing a broken
-  selector takes one page reload instead of an afternoon of guessing.
-- **Encrypted session storage** — your cookie jar is sealed with AES-256-GCM into your own
-  httpOnly cookie. No database, no session table, survives Vercel cold starts.
-- **Optional app password** — one shared password in front of the whole app.
-
-## Architecture
+## Layout
 
 ```
-Browser (once, by hand)
-   └── signs in at elms.sti.edu via Microsoft Entra ID
-        └── you copy the cookies out of DevTools
-
-Vercel
-   ├── GET  /                     dashboard
-   ├── POST /api/session          validate + seal your cookie jar
-   ├── GET  /api/courses          JSON course list
-   ├── GET  /api/courses/:id      assignments, announcements, grades
-   ├── GET  /api/raw?path=…       DOM inspector
-   └── POST /api/gate             optional app password
-
-Vercel is stateless, so the session lives in your encrypted cookie.
-Swap lib/session.ts for Vercel KV if the jar outgrows the ~4 KB cookie budget.
+VERSION              pinned versions + SHA-256 for every jar (single source of truth)
+mc                   the only script you need: install, start, stop, backup, update, …
+lib/common.sh        shared shell helpers
+config/              seed files, copied into server/ on first install
+  server.properties    network, world and player settings
+  eula.txt             ships with eula=false on purpose
+  ops.json whitelist.json banned-*.json
+systemd/             unit file for a bare cloud VM
+docker/              Dockerfile, entrypoint and compose file
+server/              runtime state — worlds, plugins, logs, generated configs (gitignored)
+backups/             output of `mc backup` (gitignored)
 ```
 
-## Getting started
+Everything under `config/` is a **seed**. `mc install` copies each file into `server/` only if
+it is not already there, so once the server has booted, `server/server.properties` is the live
+config and editing `config/server.properties` changes nothing.
+
+## Quick start
 
 ```bash
-npm install
-cp .env.example .env.local     # then set SESSION_SECRET
-openssl rand -base64 32        # generate SESSION_SECRET
-npm run dev                    # http://localhost:3000
+# 1. Java 25+
+java -version
+
+# 2. Accept the EULA. This is your call to make, so the installer refuses to
+#    continue until you flip it.
+$EDITOR config/eula.txt        # set eula=true, after reading the EULA
+
+# 3. Download and checksum-verify Paper, Geyser and Floodgate
+./mc install
+
+# 4. Run it
+./mc start
 ```
 
-| Variable | Required | Purpose |
-| --- | --- | --- |
-| `SESSION_SECRET` | yes | AES key for the sealed session cookie |
-| `APP_PASSWORD` | recommended for public deploys | Password gate in front of the whole app |
-| `STI_DASHBOARD_PATH` | no | Defaults to `/home` (confirmed) |
-| `STI_COURSES_PATH` | no | Defaults to `/courses` (**404s today**) |
-| `STI_ASSIGNMENTS_PATH` | no | Defaults to `/assignments` (**404s today**) |
-| `STI_ANNOUNCEMENTS_PATH` | no | Defaults to `/announcements` (**404s today**) |
+`mc install` refuses to install a jar whose SHA-256 does not match the pin in `VERSION`, and
+refuses to seed a config file that already exists.
 
-## Signing in
+## Commands
 
-There are two methods, and which one you need is decided by STI, not by this app.
-
-### Option A — password form
-
-Enter your Office365 username and password at `/session`.
-
-This posts to `POST /log_in/submit_from_portal` with a CSRF token scraped from `GET /log_in/form`.
-
-**It will probably not work for your account.** STI hides that form behind an "Admin log in" toggle,
-because normal students are meant to authenticate through Microsoft Entra ID — an OIDC flow that
-requires a real browser and may require MFA. A server cannot complete it.
-
-### Option B — paste cookies (the one that works)
-
-1. Open <https://elms.sti.edu> and sign in normally.
-2. Open DevTools → **Application** → **Cookies** → `https://elms.sti.edu`.
-3. Select the rows and copy them.
-4. Paste into `/session` under **Paste cookies**.
-
-You do **not** need to edit, convert, or tidy what you paste. Three formats are accepted:
-
-| What you paste | Example |
+| Command | What it does |
 | --- | --- |
-| The raw DevTools grid export | tab-separated, header row and all |
-| A JSON array from Playwright | `[{"name":"lms_session_v1","value":"…"}]` |
-| A `document.cookie` string | `lms_session_v1=…; browser_session=…` |
+| `mc install` | Check Java, seed `server/`, download + verify the three jars |
+| `mc start` | Run in the foreground; Ctrl-C sends a clean `stop` |
+| `mc stop` | Ask a running server to shut down, waiting up to 120s |
+| `mc restart` | `stop`, then `start` |
+| `mc status` | Running state, pinned versions, ports. Exit 3 when stopped |
+| `mc logs [n]` | Tail `server/logs/latest.log` (default 50 lines) |
+| `mc console <cmd>` | Send a command to the running server |
+| `mc backup` | Stop if needed, zip worlds and player data into `backups/` |
+| `mc update` | Report newer builds |
+| `mc update --apply` | Re-pin `VERSION` and download the new jars |
 
-Anything not belonging to `elms.sti.edu` is discarded server-side, so it is safe to paste the
-whole grid even though DevTools also lists your Google and Microsoft cookies on the same screen.
+`--yes` skips confirmation prompts: `./mc backup --yes`.
 
-Two invariants the app enforces:
+## Installing Java 25
 
-- **Only `elms.sti.edu` cookies are kept.** Everything else is dropped, so a stray Google session
-  can never end up in the app's stored jar.
-- **A session cookie must be present.** If what you pasted contains no cookie whose name looks like
-  a session, the app says so instead of silently storing something useless.
-
-The cookie that authenticates you is **`lms_session_v1`**. It is httpOnly, so `document.cookie` will
-never show it — you must use the DevTools grid.
-
-`parseCookieInput` is exercised against a real 21-row DevTools export containing Google, `.sti.edu`
-analytics and eLMS cookies together:
-
-```
-kept 4 of 21 pasted rows   -> browser_session, cfid, lms_session_v1, session_timeout_countdown
-foreign cookie leak check  -> NONE
-sealed cookie size         -> 2631 bytes (budget ~3800)
-google-only paste          -> rejected
-```
-
-### Credentials format
-
-Published on STI's own [FAQ page](https://elms.sti.edu/page/show/495374):
-
-```
-Student  [Lastname.last6ofstudentnumber@campus.edu.ph]  /  Lastname + YYYYMMDD
-Parent   [studentId]_parent                            /  LastnameYYYYMMDD
-```
-
-Passwords are case-sensitive with an uppercase first letter.
-
-## ⚠️ Unconfirmed routes — read this before trusting the parsers
-
-Only one route is confirmed, because confirming the rest requires an account I do not have:
-
-| Route | Status |
-| --- | --- |
-| `/` | Public landing page. **Never requires a session**, so it cannot be used to test auth. |
-| `/home` | **Confirmed** signed-in dashboard. Anonymous visitors are redirected to `/site/not_logged_in?from=%2Fhome&log_in_required=true`. |
-| `/courses` | **404.** Verified to not exist. |
-| `/my`, `/dashboard`, `/main`, `/calendar`, `/announcements`, `/assignments`, `/profile`, `/user/profile` | **404.** Verified to not exist. |
-
-So: **`/home` and auth detection work today. Course parsing does not, until you tell it the right
-route.** That is why the app ships a route-discovery step rather than pretending otherwise.
-
-### How to wire up the rest
-
-1. Sign in via Option B.
-2. Open the dashboard. It lists the real routes found in your session.
-3. Confirm one with the DOM inspector, e.g. `/api/raw?path=/site/index`.
-4. If the course list lives somewhere else, set `STI_COURSES_PATH` and redeploy.
-5. Adjust the selectors in `lib/parse.ts` to match the markup you actually got back.
-
-Session cookies expire on the STI side long before this app's 8-hour cookie does. The dashboard
-surfaces a "reconnect" link rather than showing a blank page.
-
-## Deploying to Vercel
+Ubuntu 22.04's own repos top out below 25, so use Temurin:
 
 ```bash
-npx vercel
+sudo apt-get install -y wget apt-transport-https gpg
+wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public \
+  | gpg --dearmor | sudo tee /usr/share/keyrings/adoptium.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] \
+https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo "$VERSION_CODENAME") main" \
+  | sudo tee /etc/apt/sources.list.d/adoptium.list
+sudo apt-get update
+sudo apt-get install -y temurin-25-jdk
 ```
 
-Or import the repo at [vercel.com/new](https://vercel.com/new) and add both environment variables:
+## Heap sizing
 
-- `SESSION_SECRET` — required, the app refuses to start without it
-- `APP_PASSWORD` — set this if the deployment is reachable by anyone else
-
-Nothing else is needed: no database, no build config, Node 20+ runtime is the default.
-
-## Security notes
-
-- **Set `APP_PASSWORD` on any public deployment.** Without it, anyone who finds your URL gets a
-  working proxy into their own eLMS account, which is exactly the kind of thing STI would rather
-  not see from a student IP.
-- **Your STI session is the crown jewel.** It is stored encrypted and httpOnly, but treat the
-  deployment as holding a live school session. Rotate it by signing out at elms.sti.edu.
-- **Credentials are never persisted.** Password mode submits them straight to STI and discards
-  them. Do not add a "remember me" that writes to disk.
-- **Login attempts are rate limited** to 10 per IP per 10 minutes, so this app cannot be used to
-  hammer STI's login.
-- **`/api/raw` cannot be used as an open proxy.** `assertSafePath` rejects `//evil.example` and
-  `/\evil.example`, both of which are protocol-relative and would otherwise escape the STI origin.
-
-## Scope
-
-This reads **your own** account: your courses, assignments, announcements and grades.
-
-It deliberately does not submit work, touch attendance, or reach other students' records. Those
-are academic-integrity territory, not tooling territory.
-
-If you need more than this, ask first — `elms@sti.edu` or <https://www.sti.edu/support.asp>. Some
-Neo LMS installs ship an institution-gated REST API or an official mobile app, which would make
-all of this unnecessary.
-
-## Scripts
+`VERSION` sets `MIN_MEMORY` / `MAX_MEMORY` (both `4G`). Override per machine in `server.env`,
+which is gitignored:
 
 ```bash
-npm run dev        # dev server
-npm run build      # production build
-npm run start      # serve the build
-npm run typecheck  # tsc --noEmit
+cat > server.env <<'EOF'
+MIN_MEMORY=8G
+MAX_MEMORY=8G
+EOF
 ```
 
-## License
+A rough rule: 4G is comfortable for a handful of players. More players and more loaded chunks
+want more, and the JVM needs headroom above the heap for the world, so give the machine
+roughly 1.5–2× `MAX_MEMORY` in RAM.
 
-MIT. Not affiliated with or endorsed by STI College.
+## Firewalls
+
+Both ports have to be reachable, and they are different protocols:
+
+```bash
+sudo ufw allow 25565/tcp     # Java
+sudo ufw allow 19132/udp     # Bedrock
+```
+
+Behind a cloud provider you usually need a security group as well — most default to blocking
+UDP, which breaks Bedrock only, making it look like Geyser is misconfigured when it is fine.
+
+```
+# cloud providers without a security group: a plain NAT still needs this
+sudo iptables -A INPUT -p udp --dport 19132 -j ACCEPT
+```
+
+## Deploying on a bare VM
+
+```bash
+sudo useradd --system --create-home --home-dir /opt/minecraft --shell /usr/sbin/nologin minecraft
+sudo cp -r . /opt/minecraft
+sudo chown -R minecraft:minecraft /opt/minecraft
+sudo cp /opt/minecraft/systemd/minecraft.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now minecraft
+journalctl -u minecraft -f
+```
+
+`mc start` traps `SIGTERM` and turns it into a console `stop`, and the unit sets
+`KillMode=mixed`, so `systemctl stop` saves the world instead of killing it. `TimeoutStopSec` is
+180s to allow for a large save.
+
+To run as your own user instead, drop the `User=`/`Group=` lines and install the unit as that
+user.
+
+## Deploying with Docker
+
+```bash
+cd docker
+docker compose build
+docker compose run --rm minecraft ./mc install   # seeds server/, stops on the EULA
+$EDITOR server/eula.txt                          # eula=true
+docker compose up -d
+docker compose logs -f
+```
+
+`./server` and `./backups` are bind mounts, so worlds survive `docker compose build`.
+
+The container's `mem_limit` is what the JVM sees as system memory, so keep it comfortably above
+`MAX_MEMORY`. `stop_grace_period: 2m` matches the systemd timeout.
+
+## Cross-play notes
+
+- Both plugins ship preconfigured. Geyser finds Floodgate's key automatically, so there is no
+  manual key copying — do not hand-edit `server/plugins/*/key.pem`.
+- Bedrock usernames are prefixed with `.` to avoid colliding with Java names. Players appear as
+  `.Steve` in chat and `mc console list`.
+- A Bedrock player keeps one inventory across Java and Bedrock while
+  `online-mode=true` in `server.properties`. Turning that off breaks it.
+- Both plugins write their own `config.yml` on first run inside their folder under
+  `server/plugins/`. Check `ls server/plugins` for the exact names before editing. Worth
+  changing later: Floodgate's `enable-global-linking` (set it to `false` if you would rather not
+  talk to Geyser's global link service) and Geyser's Bedrock port if you changed it above.
+
+## Whitelisting
+
+The server is open to anyone who finds the IP until you say otherwise:
+
+```bash
+./mc console whitelist on
+./mc console whitelist add Steve
+./mc console whitelist add .Steve     # Bedrock player, including Floodgate's "."
+```
+
+`mc console` writes straight into the server console, so every console command works here.
+
+## Updating
+
+```bash
+./mc update             # report only
+./mc update --apply     # rewrite VERSION, download, tell you to restart
+```
+
+`--apply` edits only the version and checksum lines in `VERSION`, leaving its comments alone, and
+it re-downloads and re-verifies. Git history is the audit trail for what changed and when.
+
+Paper updates are safe across builds. Geyser and Floodgate track Minecraft's Bedrock protocol,
+so their latest build is always used rather than a pinned old one — if a Bedrock client suddenly
+cannot connect after a Paper-only update, that is the first thing to check.
+
+## Backups
+
+```bash
+./mc backup            # stops the server first, so the snapshot is consistent
+./mc backup --yes
+```
+
+Worlds are not in git. `mc backup` writes a timestamped zip to `backups/` covering the overworld,
+nether, end, player data, plugin data and `server.properties`; jars are skipped because
+`VERSION` can always re-fetch them. Cron it, and copy the zips somewhere the VM cannot delete.
+
+## What is deliberately not here
+
+No plugin set beyond cross-play. EssentialsX, LuckPerms, CoreProtect and friends all work on
+Paper, and adding them means committing to keeping them updated — drop them into
+`server/plugins/` and Paper loads them on the next boot. `mc backup` already picks up their
+data directories.
+
+Minecraft itself, Paper, Geyser and Floodgate are not redistributed here. `mc install` fetches
+them at the pinned, checksum-verified versions.
+
+## Licence
+
+MIT for the scripts and config in this repository. Minecraft and its server software are
+copyrighted by their respective owners; this repository is not affiliated with or endorsed by
+Mojang Studios or Microsoft.

@@ -1,0 +1,8 @@
+# Runtime state lives in volumes, never in the image.
+server/
+backups/
+server.env
+
+.git
+.gitignore
+*.log
