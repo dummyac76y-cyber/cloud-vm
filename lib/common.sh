@@ -174,6 +174,19 @@ seed_config() {
   return 0
 }
 
+# Rewrite one key in the live server.properties, preserving comments and order.
+# Used by `mc deploy` to turn RCON on without shipping a hand-edited file.
+set_server_property() {
+  local key="$1" value="$2" props="${3:-$SERVER_DIR/server.properties}"
+  local escaped
+  escaped="$(printf '%s' "$value" | sed 's/[\\&|]/\\&/g')"
+  if grep -qE "^[[:space:]]*${key}=" "$props"; then
+    sed -i -E "s|^[[:space:]]*${key}=.*|${key}=${escaped}|" "$props"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$props"
+  fi
+}
+
 check_eula() {
   local eula="$SERVER_DIR/eula.txt"
   [[ -f "$eula" ]] || die "eula.txt missing from server/. Run 'mc install' first."

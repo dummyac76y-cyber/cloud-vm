@@ -454,7 +454,7 @@ cmd_deploy() {
   local unit="minecraft.service"
 
   local step_no=0
-  step() { printf '\n%s[%d/%d] %s%s\n' "$C_BLUE" "$((++step_no))" 8 "$*" "$C_RESET"; }
+  step() { printf '\n%s[%d/%d] %s%s\n' "$C_BLUE" "$((++step_no))" 10 "$*" "$C_RESET"; }
   # Prints instead of executing under --dry-run, so the plan is reviewable.
   run() {
     if (( dry_run )); then
@@ -463,6 +463,24 @@ cmd_deploy() {
     fi
     "$@"
   }
+  # Tolerant secret lookup: on a first deploy the file does not exist yet, and
+  # under `set -e` + pipefail a plain sed on a missing file would abort the run.
+  read_secret() {
+    [[ -r "$1" ]] || return 0
+    local value
+    value="$(sed -n "s/^$2=//p" "$1" | head -1)" || return 0
+    printf '%s' "$value"
+  }
+
+  # Random alphanumeric string. dd reads an exact count so nothing downstream is
+  # left holding a broken pipe -- `head -c` inside a pipeline can SIGPIPE the
+  # producer and fail the whole command under pipefail.
+  random_secret() {
+    local raw
+    raw="$(dd if=/dev/urandom bs="$1" count=1 2>/dev/null | base64 | tr -dc 'A-Za-z0-9')" || return 1
+    printf '%s' "${raw:0:$1}"
+  }
+
   # Run as the service user. Already root by now, and sudo is not installed on
   # every minimal image, so prefer runuser from util-linux.
   as_svc() {
@@ -558,7 +576,9 @@ cmd_deploy() {
     while IFS= read -r -d '' item; do
       rel="${item#"$REPO_ROOT"/}"
       case "$rel" in
-        server|backups|.git) continue ;;   # never touch live world data
+        # server/backups hold live world data and are never copied or removed;
+        # web/ builds on Vercel, so shipping node_modules to the VM is waste.
+        server|backups|.git|web) continue ;;
       esac
       dest="$install_dir/$rel"
       # Replace first, so re-running does not nest directories.
@@ -566,7 +586,7 @@ cmd_deploy() {
       mkdir -p "$(dirname "$dest")"
       cp -rp "$item" "$dest"
     done < <(find "$REPO_ROOT" -mindepth 1 -maxdepth 1 \
-               ! -name '.git' ! -name 'server' ! -name 'backups' -print0)
+               ! -name '.git' ! -name 'server' ! -name 'backups' ! -name 'web' -print0)
     ok "copied repository to $install_dir"
     run chown -R "$svc_user":"$svc_user" "$install_dir"
   fi
@@ -596,10 +616,56 @@ cmd_deploy() {
     (( dry_run )) || ok "unit installed and enabled"
   fi
 
+  step "RCON for player counts"
+  # The status page needs to ask the server who is online, and RCON is the only
+  # interface that answers that. Enable it with a generated password, and keep
+  # the port on loopback: `ufw deny` still allows 127.0.0.1 but drops the public
+  # path, which is the one thing that must not leak.
+  local rcon_pw secrets_file="/etc/minecraft-bridge.env"
+  if (( dry_run )); then
+    dim "would enable RCON on 127.0.0.1:25575 with a generated password"
+  else
+    rcon_pw="$(read_secret "$secrets_file" RCON_PASSWORD)"
+    if [[ -z "$rcon_pw" ]]; then
+      rcon_pw="$(random_secret 24)"
+      local token
+      token="$(random_secret 40)"
+      ( umask 077
+        {
+          printf '# Written by mc deploy: the RCON password and the token the\n'
+          printf '# web app authenticates with. Keep this file private.\n'
+          printf 'RCON_PASSWORD=%s\n' "$rcon_pw"
+          printf 'BRIDGE_TOKEN=%s\n' "$token"
+        } > "$secrets_file" )
+      ok "wrote $secrets_file (mode 600)"
+    else
+      ok "reusing the existing secrets in $secrets_file"
+    fi
+
+    set_server_property enable-rcon true "$install_dir/server/server.properties"
+    set_server_property rcon.port 25575 "$install_dir/server/server.properties"
+    set_server_property rcon.password "$rcon_pw" "$install_dir/server/server.properties"
+    chown "$svc_user":"$svc_user" "$install_dir/server/server.properties"
+    ok "RCON enabled on 127.0.0.1:25575 (a server restart applies it)"
+  fi
+
+  step "bridge for the web app"
+  local bridge_unit="minecraft-bridge.service"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    dim "no systemd: run bridge/bridge.py yourself with RCON_PASSWORD and BRIDGE_TOKEN set"
+  else
+    run cp "$install_dir/systemd/$bridge_unit" "/etc/systemd/system/$bridge_unit"
+    run systemctl daemon-reload
+    run systemctl enable --now "$bridge_unit"
+    (( dry_run )) || ok "bridge installed on 127.0.0.1:8787"
+  fi
+
   step "firewall"
   if command -v ufw >/dev/null 2>&1; then
     run ufw allow 25565/tcp
     run ufw allow 19132/udp
+    # RCON can run server commands. Loopback still works; the internet does not.
+    run ufw deny 25575/tcp
   else
     dim "ufw not installed — allow 25565/tcp and 19132/udp in your cloud security group"
   fi
@@ -623,6 +689,15 @@ cmd_deploy() {
   dim "console   sudo -u $svc_user $install_dir/mc console op <player>"
   dim "problems? sudo -u $svc_user $install_dir/mc doctor"
   dim "remember to allow 25565/tcp and 19132/udp in the cloud security group too"
+  echo
+  dim "the web app in web/ needs these Vercel environment variables:"
+  if (( ! dry_run )) && [[ -r "$secrets_file" ]]; then
+    dim "  MINECRAFT_BRIDGE_TOKEN=$(read_secret "$secrets_file" BRIDGE_TOKEN)"
+  else
+    dim "  MINECRAFT_BRIDGE_TOKEN=<from $secrets_file>"
+  fi
+  dim "  ADMIN_PASSWORD=<something you choose>"
+  dim "  MINECRAFT_BRIDGE_URL=https://<tunnel host>  (forwards to 127.0.0.1:8787 here)"
 }
 
 # ---- doctor -----------------------------------------------------------------

@@ -15,3 +15,7 @@
 
 *.log
 .DS_Store
+
+# Python bytecode from running the bridge and its tests on this machine.
+__pycache__/
+*.py[cod]

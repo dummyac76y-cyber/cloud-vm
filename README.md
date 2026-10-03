@@ -240,6 +240,44 @@ Worlds are not in git. `mc backup` writes a timestamped zip to `backups/` coveri
 nether, end, player data, plugin data and `server.properties`; jars are skipped because
 `VERSION` can always re-fetch them. Cron it, and copy the zips somewhere the VM cannot delete.
 
+## Status web page (Vercel)
+
+A Minecraft server cannot run on Vercel &mdash; functions are request-scoped and capped at 300s,
+there is no UDP for Bedrock, and you do not get to choose the runtime image. So the server stays on
+the VM and Vercel hosts only a small read-mostly front end:
+
+```
+Vercel (Next.js, web/)  ──HTTPS──▶  tunnel  ──▶  bridge (bridge/bridge.py, 127.0.0.1:8787)
+                                                          │
+                                                          ├─ RCON 127.0.0.1:25575  status, player list
+                                                          └─ mc console / mc backup
+```
+
+`mc deploy` already enables RCON on loopback, writes the secrets to `/etc/minecraft-bridge.env`
+(mode 600) and installs `minecraft-bridge.service`. Expose the bridge with a tunnel, then set three
+variables on the Vercel project and point its root directory at `web`:
+
+| Variable | Where it comes from |
+| --- | --- |
+| `MINECRAFT_BRIDGE_URL` | your tunnel URL, forwarding to `127.0.0.1:8787` |
+| `MINECRAFT_BRIDGE_TOKEN` | `BRIDGE_TOKEN` in `/etc/minecraft-bridge.env` |
+| `ADMIN_PASSWORD` | anything you choose; gates `/admin` |
+| `MINECRAFT_JOIN_ADDRESS` | the hostname players connect to, shown on the page |
+
+With `cloudflared` installed, a tunnel is one command and needs no open inbound port:
+
+```bash
+cloudflared tunnel --no-autoupdate run --url http://127.0.0.1:8787
+```
+
+Two things stay off the internet on purpose: RCON (it can run server commands) is bound to
+loopback and `ufw deny 25575`, and the bridge itself binds to `127.0.0.1`. The bridge token never
+reaches the browser &mdash; pages fetch server-side &mdash; and `/admin` needs the admin password
+before it will touch anything.
+
+The bridge degrades rather than breaks: if RCON is unreachable, `/status` still reports the running
+state from the pid file and the page says player counts are approximate.
+
 ## When it will not deploy
 
 Start here:
