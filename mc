@@ -30,6 +30,7 @@ Commands
   console <cmd>    Send a command to the running server, e.g. `mc console op Steve`
   backup           Stop-and-zip a consistent snapshot into backups/
   update [--apply] Show newer Paper/Geyser/Floodgate builds; --apply re-pins
+  doctor           Check everything a deploy needs and report what is wrong
   help             This text
 
 Options
@@ -40,6 +41,7 @@ Examples
   mc start
   mc console op Steve
   mc update --apply
+  mc doctor
 USAGE
 }
 
@@ -428,6 +430,203 @@ cmd_update() {
   ok "update installed — restart with 'mc restart'"
 }
 
+# ---- doctor -----------------------------------------------------------------
+
+# Everything here is checked read-only, so `mc doctor` is safe to run on a fresh
+# clone before `install`, and safe to paste the output of into an issue.
+cmd_doctor() {
+  # Nearly every check below needs the pins. A missing or incomplete VERSION is
+  # itself a deploy blocker, and common.sh names the offending key.
+  load_versions
+  load_local_env
+
+  local fails=0 warns=0
+
+  # All of this goes to stdout, including the failures: the report is meant to be
+  # read top to bottom and pasted into an issue, and stderr would interleave.
+  pass()  { printf '%s  ok%s %s\n'   "$C_GREEN"  "$C_RESET" "$*"; }
+  fail()  { printf '%s err%s %s\n'   "$C_RED"    "$C_RESET" "$*"; fails=$((fails + 1)); }
+  warn_() { printf '%swarn%s %s\n'   "$C_YELLOW" "$C_RESET" "$*"; warns=$((warns + 1)); }
+  info()  { printf '%s     %s%s\n'   "$C_DIM"    "$*"      "$C_RESET"; }
+
+  log "host"
+  info "os        $(uname -s) $(uname -r) ($(uname -m))"
+  if [[ -f /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    info "distro    $(. /etc/os-release && echo "$PRETTY_NAME")"
+  fi
+  if [[ -f /.dockerenv ]]; then
+    info "container yes (docker)"
+  fi
+  info "user      $(id -un) (uid $(id -u))"
+  info "path      $REPO_ROOT"
+
+  log "tools"
+  local tool
+  for tool in curl zip; do
+    if command -v "$tool" >/dev/null 2>&1; then
+      pass "$tool -> $(command -v "$tool")"
+    else
+      fail "$tool not found"
+    fi
+  done
+  if command -v jq >/dev/null 2>&1; then
+    info "jq        $(jq --version 2>/dev/null)"
+  elif command -v python3 >/dev/null 2>&1; then
+    info "jq        missing (python3 fallback works for 'mc update')"
+  else
+    fail "neither jq nor python3 — 'mc update' cannot query the update APIs"
+  fi
+  if command -v unzip >/dev/null 2>&1; then
+    pass "unzip -> $(command -v unzip)"
+  else
+    warn_ "unzip not found (only needed to inspect a backup)"
+  fi
+
+  log "java"
+  # Paper 26.1+ refuses to start on Java 24, so this is the single most common
+  # reason a deploy fails.
+  if ! command -v java >/dev/null 2>&1; then
+    fail "java not found — install a JDK ${JAVA_MAJOR}+ (README: Installing Java 25)"
+  else
+    local jmajor jline
+    jline="$(java -version 2>&1)"
+    jmajor="$(java_major || true)"
+    if [[ -z "$jmajor" ]]; then
+      fail "could not parse java version from: ${jline%%$'\n'*}"
+    elif (( jmajor < JAVA_MAJOR )); then
+      fail "Java ${jmajor} found, but Paper needs ${JAVA_MAJOR}+ — the server will refuse to boot"
+    else
+      pass "java ${jmajor} (need ${JAVA_MAJOR}+)"
+    fi
+    info "$(command -v java)"
+  fi
+
+  log "resources"
+  if command -v free >/dev/null 2>&1; then
+    local avail_mb
+    avail_mb="$(free -m | awk '/^Mem:/ {print $7}')"
+    local want_mb="${MAX_MEMORY%G}"
+    if [[ "$want_mb" =~ ^[0-9]+$ ]] && [[ -n "$avail_mb" ]] && (( avail_mb < want_mb )); then
+      warn_ "only ${avail_mb}MB RAM available, MAX_MEMORY is ${MAX_MEMORY} — the JVM may fail to reserve its heap"
+    else
+      info "ram       ${avail_mb}MB available (MAX_MEMORY ${MAX_MEMORY})"
+    fi
+  fi
+  if command -v df >/dev/null 2>&1; then
+    local src avail_kb
+    src="$(df -P "$REPO_ROOT" 2>/dev/null | awk 'NR==2 {print $4}')"
+    avail_kb="${src:-0}"
+    # Paper alone is ~65MB; a world grows fast, so want a few GB free.
+    if [[ -n "$src" ]] && (( avail_kb < 2097152 )); then
+      warn_ "only $((avail_kb / 1024))MB free on $(df -P "$REPO_ROOT" | awk 'NR==2 {print $6}') — worlds need GBs"
+    else
+      info "disk      $((avail_kb / 1024))MB free"
+    fi
+  fi
+
+  log "layout"
+  pass "VERSION readable and complete"
+  info "pins      paper ${MINECRAFT_VERSION} b${PAPER_BUILD}, geyser ${GEYSER_VERSION} b${GEYSER_BUILD}, floodgate ${FLOODGATE_VERSION} b${FLOODGATE_BUILD}"
+
+  local dir
+  for dir in "$SERVER_DIR" "$BACKUP_DIR"; do
+    if [[ ! -d "$dir" ]]; then
+      info "$(basename "$dir")/     not created yet"
+    elif [[ -w "$dir" ]]; then
+      pass "$(basename "$dir")/ writable"
+    else
+      fail "$(basename "$dir")/ not writable by $(id -un) — in Docker this means the entrypoint's chown did not run"
+    fi
+  done
+
+  log "install state"
+  if [[ ! -d "$SERVER_DIR" ]]; then
+    info "server/   missing — run 'mc install'"
+  else
+    local spec dest name
+    for spec in "paper:$PAPER_JAR:$PAPER_SHA256" \
+                "geyser:$GEYSER_JAR:$GEYSER_SHA256" \
+                "floodgate:$FLOODGATE_JAR:$FLOODGATE_SHA256"; do
+      name="${spec%%:*}"; spec="${spec#*:}"
+      dest="${spec%:*}"; spec="${spec#*:}"
+      if [[ ! -f "$dest" ]]; then
+        warn_ "$name jar missing — run 'mc install'"
+      elif [[ -n "$spec" ]]; then
+        local actual
+        actual="$(sha256_of "$dest")"
+        if [[ "$actual" == "$spec" ]]; then
+          pass "$name jar matches the pin"
+        else
+          fail "$name jar checksum mismatch — delete it and run 'mc install'"
+        fi
+      fi
+    done
+
+    local eula="$SERVER_DIR/eula.txt"
+    if [[ ! -f "$eula" ]]; then
+      fail "eula.txt missing — run 'mc install'"
+    elif grep -qiE '^[[:space:]]*eula[[:space:]]*=[[:space:]]*true' "$eula"; then
+      pass "EULA accepted in server/eula.txt"
+    else
+      fail "EULA not accepted — set eula=true in $eula after reading https://aka.ms/MinecraftEULA"
+    fi
+  fi
+
+  log "network"
+  # A port already in use is the usual cause of a server that starts and dies.
+  # /proc/net needs no packages (`ss` only exists if iproute2 happens to be
+  # installed), and covers UDP as well as TCP.
+  local tcp_ports udp_ports
+  tcp_ports="$(awk 'NR>1 && $4=="0A" {split($2,a,":"); print toupper(a[2])}' \
+                 /proc/net/tcp /proc/net/tcp6 2>/dev/null || true)"
+  udp_ports="$(awk 'NR>1 {split($2,a,":"); print toupper(a[2])}' \
+                 /proc/net/udp /proc/net/udp6 2>/dev/null || true)"
+
+  local spec port proto hex listening
+  for spec in "25565:tcp:java" "19132:udp:bedrock"; do
+    port="${spec%%:*}"; spec="${spec#*:}"
+    proto="${spec%%:*}"; proto_label="${spec#*:}"
+    hex="$(printf '%04X' "$port")"
+
+    if [[ "$proto" == "tcp" ]]; then
+      listening="$tcp_ports"
+    else
+      listening="$udp_ports"
+    fi
+
+    # An empty list means nothing is bound, which is the good case; only an
+    # unreadable /proc/net means we could not tell.
+    if [[ ! -r "/proc/net/$proto" ]]; then
+      info "$port/$proto ($proto_label) could not be checked"
+    elif grep -qxF "$hex" <<<"$listening"; then
+      if server_pid >/dev/null; then
+        info "$port/$proto ($proto_label) in use by this server — fine"
+      else
+        fail "$port/$proto ($proto_label) is already in use by another process — mc start will fail"
+      fi
+    else
+      info "$port/$proto ($proto_label) free"
+    fi
+  done
+  info "remember: a cloud security group must allow 25565/tcp and 19132/udp inbound"
+
+  log "state"
+  if server_pid >/dev/null 2>&1; then
+    pass "server running (pid $(server_pid))"
+  else
+    info "not running"
+  fi
+
+  echo
+  if (( fails > 0 )); then
+    err "$fails problem(s) found, $warns warning(s)"
+    return 1
+  fi
+  ok "no problems found ($warns warning(s))"
+  return 0
+}
+
 # ---- dispatch ---------------------------------------------------------------
 
 main() {
@@ -446,6 +645,7 @@ main() {
     console) cmd_console "$@" ;;
     backup)  cmd_backup "$@" ;;
     update)  cmd_update "$@" ;;
+    doctor)  cmd_doctor "$@" ;;
     help|-h|--help) usage ;;
     *) err "unknown command: $command"; echo; usage; exit 1 ;;
   esac

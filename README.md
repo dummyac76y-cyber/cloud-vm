@@ -70,6 +70,7 @@ refuses to seed a config file that already exists.
 | `mc backup` | Stop if needed, zip worlds and player data into `backups/` |
 | `mc update` | Report newer builds |
 | `mc update --apply` | Re-pin `VERSION` and download the new jars |
+| `mc doctor` | Check Java, RAM, disk, permissions, jar checksums, EULA and ports; exit 1 if anything blocks a deploy |
 
 `--yes` skips confirmation prompts: `./mc backup --yes`.
 
@@ -215,6 +216,27 @@ cannot connect after a Paper-only update, that is the first thing to check.
 Worlds are not in git. `mc backup` writes a timestamped zip to `backups/` covering the overworld,
 nether, end, player data, plugin data and `server.properties`; jars are skipped because
 `VERSION` can always re-fetch them. Cron it, and copy the zips somewhere the VM cannot delete.
+
+## When it will not deploy
+
+Start here:
+
+```bash
+./mc doctor
+```
+
+It is read-only, safe on a fresh clone before `install`, and prints one line per check —
+Java version against what Paper needs, free RAM and disk, whether `server/` is writable by the
+user you are, whether each jar still matches its pin, the EULA, and whether 25565/19132 are
+already taken. It exits 1 if anything would block a deploy, so it is also usable from a deploy
+script. Paste its output into a bug report; it contains nothing private.
+
+The checks it cannot make from inside the box:
+
+- **Cloud security group / NAT.** 25565/tcp and 19132/udp must be allowed inbound. Providers
+  commonly drop UDP, which leaves Java players working and only Bedrock broken.
+- **A JVM that boots and then exits.** Read `server/logs/latest.log` (`./mc logs -f`) for the real
+  reason; Paper's own error is at the bottom.
 
 ## What is deliberately not here
 
