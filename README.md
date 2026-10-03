@@ -90,11 +90,39 @@ requires a real browser and may require MFA. A server cannot complete it.
 
 1. Open <https://elms.sti.edu> and sign in normally.
 2. Open DevTools → **Application** → **Cookies** → `https://elms.sti.edu`.
-3. Copy every cookie (a `document.cookie` string or DevTools' JSON export both work).
+3. Select the rows and copy them.
 4. Paste into `/session` under **Paste cookies**.
 
-The app then checks that those cookies are genuinely authenticated by loading the login-gated
-dashboard, and refuses to store anything that is not.
+You do **not** need to edit, convert, or tidy what you paste. Three formats are accepted:
+
+| What you paste | Example |
+| --- | --- |
+| The raw DevTools grid export | tab-separated, header row and all |
+| A JSON array from Playwright | `[{"name":"lms_session_v1","value":"…"}]` |
+| A `document.cookie` string | `lms_session_v1=…; browser_session=…` |
+
+Anything not belonging to `elms.sti.edu` is discarded server-side, so it is safe to paste the
+whole grid even though DevTools also lists your Google and Microsoft cookies on the same screen.
+
+Two invariants the app enforces:
+
+- **Only `elms.sti.edu` cookies are kept.** Everything else is dropped, so a stray Google session
+  can never end up in the app's stored jar.
+- **A session cookie must be present.** If what you pasted contains no cookie whose name looks like
+  a session, the app says so instead of silently storing something useless.
+
+The cookie that authenticates you is **`lms_session_v1`**. It is httpOnly, so `document.cookie` will
+never show it — you must use the DevTools grid.
+
+`parseCookieInput` is exercised against a real 21-row DevTools export containing Google, `.sti.edu`
+analytics and eLMS cookies together:
+
+```
+kept 4 of 21 pasted rows   -> browser_session, cfid, lms_session_v1, session_timeout_countdown
+foreign cookie leak check  -> NONE
+sealed cookie size         -> 2631 bytes (budget ~3800)
+google-only paste          -> rejected
+```
 
 ### Credentials format
 

@@ -54,8 +54,8 @@ export default function SessionPage() {
       <div className="hint">
         <strong>Most STI student accounts can only sign in through Microsoft Entra ID</strong>, which needs
         a real browser. If the password form is rejected, use the paste-cookies option: sign in at{' '}
-        <code>elms.sti.edu</code>, open DevTools &rarr; Application &rarr; Cookies, copy all cookies for
-        that host, and paste them below.
+        <code>elms.sti.edu</code>, open DevTools &rarr; Application &rarr; Cookies, and copy the grid rows
+        below.
       </div>
 
       <div className="card">
@@ -97,9 +97,14 @@ export default function SessionPage() {
                 id="pasted"
                 value={pasted}
                 onChange={(e) => setPasted(e.target.value)}
-                placeholder="_sti_session=...; remember_user_token=..."
+                placeholder="lms_session_v1=...  (or paste the whole DevTools grid)"
                 spellCheck={false}
               />
+              <p className="muted">
+                Paste the raw grid straight from DevTools if you like. Anything not belonging to{' '}
+                <code>elms.sti.edu</code> is discarded server-side, so Google and Microsoft cookies are never
+                stored. <code>lms_session_v1</code> is the cookie that matters.
+              </p>
             </>
           )}
 

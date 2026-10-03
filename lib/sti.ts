@@ -200,31 +200,99 @@ export async function loginWithPassword(userid: string, password: string): Promi
 }
 
 /**
- * Accepts either a `document.cookie` string or the JSON array that DevTools
- * exports, so you can copy a session out of a real browser after SSO.
+ * Cookie names that belong to other providers. DevTools shows every domain's
+ * cookies at once, so pasting the raw grid can easily sweep up a Google or
+ * Microsoft session. These are dropped before anything is stored.
+ */
+const FOREIGN_COOKIE_NAMES = new Set([
+  'SID', 'HSID', 'SSID', 'APISID', 'SAPISID', 'NID', 'AEC', 'SEARCH_SAMESITE',
+  '__Secure-3PSID', '__Secure-3PSIDCC', '__Secure-3PSIDTS', '__Secure-3PSIDRTS',
+  '__Secure-ENID', '__Secure-BUCKET', '__Secure-OSID', '__Host-GAPS',
+  'IDE', 'MSPTC', 'MUID', 'ANONCHK', '_ga', '_ga_8B97T9T6NJ', '_gid', '_gcl_au',
+  'wfx_unq', 'MUIDB', 'MR', 'MSPTC', 'ANONCHK', 'SRM_B', 'SRM_A',
+]);
+
+const COOKIE_DOMAINS = ['elms.sti.edu', '.elms.sti.edu'];
+
+/**
+ * Parses the tab-separated export you get from DevTools → Application → Cookies
+ * when you copy the grid rows. Columns are name, value, domain, path, ...
+ */
+function parseTsv(text: string): Cookie[] {
+  const jar: Cookie[] = [];
+
+  for (const line of text.split(/\r?\n/)) {
+    const cells = line.split('\t');
+    if (cells.length < 3) continue;
+
+    const name = cells[0].trim();
+    const value = cells[1];
+    const domain = cells[2].trim();
+
+    // Skip the header row and anything not belonging to the eLMS host.
+    if (!name || name.toLowerCase() === 'name') continue;
+    if (!COOKIE_DOMAINS.includes(domain)) continue;
+    if (typeof value !== 'string') continue;
+
+    jar.push({ name, value });
+  }
+
+  return jar;
+}
+
+/**
+ * Accepts any of the three shapes you are likely to have on your clipboard:
+ *
+ *   1. the DevTools grid export (tab separated, every domain)
+ *   2. a JSON array of `{ name, value }`
+ *   3. a `name=value; name=value` string
+ *
+ * Foreign cookies are always dropped, so pasting the whole grid is safe.
  */
 export function parseCookieInput(input: string): Cookie[] {
   const text = input.trim();
   if (!text) throw new StiAuthError('Paste at least one cookie.');
 
+  let jar: Cookie[];
+
   if (text.startsWith('[')) {
     const parsed = JSON.parse(text) as { name: string; value: string }[];
-    const jar = parsed
+    jar = parsed
       .filter((c) => typeof c?.name === 'string' && typeof c?.value === 'string')
       .map((c) => ({ name: c.name, value: c.value }));
-    if (jar.length === 0) throw new StiAuthError('That JSON array contained no cookies.');
-    return jar;
+  } else if (text.includes('\t')) {
+    jar = parseTsv(text);
+    if (jar.length === 0) {
+      throw new StiAuthError(
+        'No elms.sti.edu rows found in that. Copy them from DevTools → Application → Cookies → https://elms.sti.edu.',
+      );
+    }
+  } else {
+    jar = text
+      .split(/;\s*/)
+      .filter((pair) => pair.includes('='))
+      .map((pair) => ({
+        name: pair.slice(0, pair.indexOf('=')).trim(),
+        value: pair.slice(pair.indexOf('=') + 1).trim(),
+      }))
+      .filter((c) => c.name.length > 0);
   }
 
-  const jar = text
-    .split(/;\s*/)
-    .filter((pair) => pair.includes('='))
-    .map((pair) => ({
-      name: pair.slice(0, pair.indexOf('=')).trim(),
-      value: pair.slice(pair.indexOf('=') + 1).trim(),
-    }))
-    .filter((c) => c.name.length > 0);
+  const cleaned = dedupe(jar).filter((c) => !FOREIGN_COOKIE_NAMES.has(c.name));
 
-  if (jar.length === 0) throw new StiAuthError('No cookies found. Copy them from DevTools.');
-  return jar;
+  if (cleaned.length === 0) {
+    throw new StiAuthError('No usable eLMS cookies found. Copy the elms.sti.edu rows from DevTools.');
+  }
+  if (!cleaned.some((c) => /session/i.test(c.name))) {
+    throw new StiAuthError(
+      `Found ${cleaned.length} cookie(s) but none named like a session. lms_session_v1 is the one that authenticates.`,
+    );
+  }
+  return cleaned;
+}
+
+function dedupe(jar: Cookie[]): Cookie[] {
+  const seen = new Map<string, Cookie>();
+  for (const c of jar) seen.set(c.name, c);
+  return [...seen.values()];
 }
