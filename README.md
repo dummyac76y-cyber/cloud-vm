@@ -70,6 +70,7 @@ refuses to seed a config file that already exists.
 | `mc backup` | Stop if needed, zip worlds and player data into `backups/` |
 | `mc update` | Report newer builds |
 | `mc update --apply` | Re-pin `VERSION` and download the new jars |
+| `mc deploy` | Set up a bare Ubuntu/Debian VM end to end: packages, Java 25, service user, `/opt/minecraft`, systemd, firewall. Needs root, idempotent, `--dry-run` to preview |
 | `mc doctor` | Check Java, RAM, disk, permissions, jar checksums, EULA and ports; exit 1 if anything blocks a deploy |
 
 `--yes` skips confirmation prompts: `./mc backup --yes`.
@@ -124,6 +125,27 @@ sudo iptables -A INPUT -p udp --dport 19132 -j ACCEPT
 
 ## Deploying on a bare VM
 
+One command does the whole thing:
+
+```bash
+git clone <this repo> && cd cloud-vm
+sudo ./mc deploy --dry-run    # preview; changes nothing
+sudo ./mc deploy
+```
+
+`mc deploy` installs the missing packages, installs Temurin Java 25 if the box has nothing new
+enough, creates the `minecraft` system user, copies the repository to `/opt/minecraft`, downloads
+and checksum-verifies the three jars, installs and enables the systemd unit, opens 25565/tcp and
+19132/udp in `ufw`, and starts the service. It stops at the EULA on the first run and tells you to
+re-run after setting `eula=true`; every step is idempotent, so re-running resumes rather than
+repeats. It never touches `server/` or `backups/`, so a world from an earlier deploy survives.
+
+Override the target with `MC_INSTALL_DIR` and `MC_SERVICE_USER` if `/opt/minecraft` is not what you
+want.
+
+<details>
+<summary>Doing it by hand instead</summary>
+
 ```bash
 sudo useradd --system --create-home --home-dir /opt/minecraft --shell /usr/sbin/nologin minecraft
 sudo cp -r . /opt/minecraft
@@ -137,6 +159,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now minecraft
 journalctl -u minecraft -f
 ```
+</details>
 
 `mc install` has to run as `minecraft`, not as you: it writes `server/` and `backups/`, and the
 unit starts the server as the same user. Run later maintenance the same way, e.g.

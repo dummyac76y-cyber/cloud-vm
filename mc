@@ -30,6 +30,7 @@ Commands
   console <cmd>    Send a command to the running server, e.g. `mc console op Steve`
   backup           Stop-and-zip a consistent snapshot into backups/
   update [--apply] Show newer Paper/Geyser/Floodgate builds; --apply re-pins
+  deploy [--dry-run]  Set up a bare Ubuntu VM end to end (root, idempotent)
   doctor           Check everything a deploy needs and report what is wrong
   help             This text
 
@@ -430,6 +431,200 @@ cmd_update() {
   ok "update installed — restart with 'mc restart'"
 }
 
+# ---- deploy -----------------------------------------------------------------
+
+# One command for a bare Ubuntu/Debian VM: prerequisites, Java 25, the service
+# user, /opt/minecraft, the systemd unit and the firewall rules. Idempotent, so
+# re-running after fixing one problem picks up where it left off.
+cmd_deploy() {
+  local dry_run=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --dry-run|-n) dry_run=1; shift ;;
+      -h|--help)    printf 'usage: mc deploy [--dry-run]\n'; return 0 ;;
+      *)            die "unknown option for mc deploy: $1" ;;
+    esac
+  done
+
+  load_versions
+  load_local_env
+
+  local install_dir="${MC_INSTALL_DIR:-/opt/minecraft}"
+  local svc_user="${MC_SERVICE_USER:-minecraft}"
+  local unit="minecraft.service"
+
+  local step_no=0
+  step() { printf '\n%s[%d/%d] %s%s\n' "$C_BLUE" "$((++step_no))" 8 "$*" "$C_RESET"; }
+  # Prints instead of executing under --dry-run, so the plan is reviewable.
+  run() {
+    if (( dry_run )); then
+      printf '     would run: %s\n' "$*"
+      return 0
+    fi
+    "$@"
+  }
+  # Run as the service user. Already root by now, and sudo is not installed on
+  # every minimal image, so prefer runuser from util-linux.
+  as_svc() {
+    if (( EUID == 0 )); then
+      runuser -u "$svc_user" -- "$@"
+    else
+      sudo -u "$svc_user" "$@"
+    fi
+  }
+
+  if (( dry_run )); then
+    log "would deploy to $install_dir as $svc_user (dry run, nothing is changed)"
+  else
+    log "deploying to $install_dir as $svc_user"
+  fi
+
+  if (( ! dry_run )); then
+    if (( EUID != 0 )); then
+      if command -v sudo >/dev/null 2>&1; then
+        warn "needs root; re-running under sudo"
+        exec sudo -- "$0" deploy
+      fi
+      die "needs root. Re-run with sudo."
+    fi
+    [[ -r /etc/os-release ]] || die "cannot identify this OS"
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    [[ "$ID" == "ubuntu" || "$ID" == "debian" ]] \
+      || die "mc deploy only supports Debian/Ubuntu (found $PRETTY_NAME). Install Java $JAVA_MAJOR yourself, then run 'mc install'."
+  fi
+
+  step "host packages"
+  local missing=()
+  local pkg
+  for pkg in curl zip unzip ca-certificates; do
+    case "$pkg" in
+      curl|zip|unzip) command -v "$pkg" >/dev/null 2>&1 || missing+=("$pkg") ;;
+    esac
+  done
+  local apt_pkgs=(ca-certificates)
+  (( ${#missing[@]} )) && apt_pkgs+=("${missing[@]}")
+  if (( ${#apt_pkgs[@]} == 1 )) && command -v curl >/dev/null 2>&1 && [[ -f /etc/ssl/certs/ca-certificates.crt ]]; then
+    ok "curl, zip, unzip and CA certificates already present"
+  else
+    run env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${apt_pkgs[@]}"
+  fi
+
+  step "java $JAVA_MAJOR+"
+  local jmajor=""
+  if command -v java >/dev/null 2>&1; then
+    jmajor="$(java_major || true)"
+  fi
+  if [[ -n "$jmajor" ]] && (( jmajor >= JAVA_MAJOR )); then
+    ok "java $jmajor already installed"
+  else
+    [[ -n "$jmajor" ]] && warn "java $jmajor is too old for Paper $MINECRAFT_VERSION"
+    # Adoptium's signed apt repo, per README. Verified to carry temurin-$JAVA_MAJOR-jdk.
+    run apt-get install -y -qq wget gnupg
+    run bash -c 'wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public | gpg --dearmor --yes -o /usr/share/keyrings/adoptium.gpg'
+    run bash -c 'echo "deb [signed-by=/usr/share/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo "$VERSION_CODENAME") main" > /etc/apt/sources.list.d/adoptium.list'
+    run env DEBIAN_FRONTEND=noninteractive apt-get update -qq
+    run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "temurin-${JAVA_MAJOR}-jdk"
+  fi
+
+  step "service account"
+  if id "$svc_user" >/dev/null 2>&1; then
+    ok "$svc_user exists"
+  else
+    run useradd --system --create-home --home-dir "$install_dir" \
+                --shell /usr/sbin/nologin "$svc_user"
+    (( dry_run )) || ok "$svc_user created"
+  fi
+
+  step "install files"
+  if (( dry_run )); then
+    printf '     would copy this repo to %s (excluding .git, server/, backups/)\n' "$install_dir"
+  else
+    # Guard the one destructive thing below: rm -rf is only ever reached with a
+    # path built from install_dir plus a name we did not copy.
+    case "$install_dir" in
+      /*) ;;
+      *)  die "MC_INSTALL_DIR must be an absolute path (got '$install_dir')" ;;
+    esac
+    [[ "$install_dir" != "/" && "$install_dir" != "/opt" && "$install_dir" != "/usr" ]] \
+      || die "refusing to use '$install_dir' as the install directory"
+
+    mkdir -p "$install_dir"
+    # Copy rather than symlink: the unit points at a real path, and a git pull
+    # in the source checkout must not be able to swap the code out from under a
+    # running server.
+    local item rel dest
+    while IFS= read -r -d '' item; do
+      rel="${item#"$REPO_ROOT"/}"
+      case "$rel" in
+        server|backups|.git) continue ;;   # never touch live world data
+      esac
+      dest="$install_dir/$rel"
+      # Replace first, so re-running does not nest directories.
+      rm -rf "$dest"
+      mkdir -p "$(dirname "$dest")"
+      cp -rp "$item" "$dest"
+    done < <(find "$REPO_ROOT" -mindepth 1 -maxdepth 1 \
+               ! -name '.git' ! -name 'server' ! -name 'backups' -print0)
+    ok "copied repository to $install_dir"
+    run chown -R "$svc_user":"$svc_user" "$install_dir"
+  fi
+
+  step "download and verify the jars"
+  if (( dry_run )); then
+    printf '     would run: %s %s/mc install\n' "$( (( EUID == 0 )) && echo "runuser -u $svc_user --" || echo "sudo -u $svc_user" )" "$install_dir"
+  else
+    if run as_svc "$install_dir/mc" install; then
+      ok "jars installed and checksum-verified"
+    else
+      err "'mc install' did not complete — the usual cause is the EULA"
+      printf '     1. read https://aka.ms/MinecraftEULA\n'
+      printf '     2. set eula=true in %s/server/eula.txt\n' "$install_dir"
+      printf '     3. re-run the same command; it resumes from here\n'
+      return 1
+    fi
+  fi
+
+  step "systemd"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "systemctl not found — skipping the unit; start with 'mc start' yourself"
+  else
+    run cp "$install_dir/systemd/$unit" "/etc/systemd/system/$unit"
+    run systemctl daemon-reload
+    run systemctl enable "$unit"
+    (( dry_run )) || ok "unit installed and enabled"
+  fi
+
+  step "firewall"
+  if command -v ufw >/dev/null 2>&1; then
+    run ufw allow 25565/tcp
+    run ufw allow 19132/udp
+  else
+    dim "ufw not installed — allow 25565/tcp and 19132/udp in your cloud security group"
+  fi
+
+  if (( dry_run )); then
+    printf '\n%s dry run: nothing was changed%s\n' "$C_YELLOW" "$C_RESET"
+    return 0
+  fi
+
+  step "start"
+  if command -v systemctl >/dev/null 2>&1; then
+    run systemctl restart "$unit"
+    dim "tail the log with: journalctl -u $unit -f"
+  else
+    dim "not started (no systemd); run: sudo -u $svc_user $install_dir/mc start"
+  fi
+
+  printf '\n'
+  ok "deploy finished"
+  dim "status    sudo -u $svc_user $install_dir/mc status"
+  dim "console   sudo -u $svc_user $install_dir/mc console op <player>"
+  dim "problems? sudo -u $svc_user $install_dir/mc doctor"
+  dim "remember to allow 25565/tcp and 19132/udp in the cloud security group too"
+}
+
 # ---- doctor -----------------------------------------------------------------
 
 # Everything here is checked read-only, so `mc doctor` is safe to run on a fresh
@@ -645,6 +840,7 @@ main() {
     console) cmd_console "$@" ;;
     backup)  cmd_backup "$@" ;;
     update)  cmd_update "$@" ;;
+    deploy)  cmd_deploy "$@" ;;
     doctor)  cmd_doctor "$@" ;;
     help|-h|--help) usage ;;
     *) err "unknown command: $command"; echo; usage; exit 1 ;;
