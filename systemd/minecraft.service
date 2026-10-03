@@ -24,7 +24,11 @@ Group=minecraft
 WorkingDirectory=/opt/minecraft
 
 ExecStart=/opt/minecraft/mc start
-ExecReload=/opt/minecraft/mc stop
+
+# `systemctl reload minecraft` asks Paper to reload plugins and config in place.
+# For a full restart that keeps the world: `mc restart` -- do not map it here, or
+# a reload would silently take the server down.
+ExecReload=/opt/minecraft/mc console reload
 
 # `mc` traps SIGTERM and turns it into a console `stop`, so the world is saved.
 # KillMode=mixed is what makes that work: SIGTERM goes to `mc` alone, and the

@@ -65,7 +65,7 @@ refuses to seed a config file that already exists.
 | `mc stop` | Ask a running server to shut down, waiting up to 120s |
 | `mc restart` | `stop`, then `start` |
 | `mc status` | Running state, pinned versions, ports. Exit 3 when stopped |
-| `mc logs [n]` | Tail `server/logs/latest.log` (default 50 lines) |
+| `mc logs [-f] [n]` | Last `n` lines of `server/logs/latest.log` (default 50); `-f` to follow |
 | `mc console <cmd>` | Send a command to the running server |
 | `mc backup` | Stop if needed, zip worlds and player data into `backups/` |
 | `mc update` | Report newer builds |
@@ -127,15 +127,25 @@ sudo iptables -A INPUT -p udp --dport 19132 -j ACCEPT
 sudo useradd --system --create-home --home-dir /opt/minecraft --shell /usr/sbin/nologin minecraft
 sudo cp -r . /opt/minecraft
 sudo chown -R minecraft:minecraft /opt/minecraft
+
+sudo -u minecraft /opt/minecraft/mc install   # seeds server/, stops on the EULA
+sudoedit /opt/minecraft/server/eula.txt       # set eula=true
+
 sudo cp /opt/minecraft/systemd/minecraft.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now minecraft
 journalctl -u minecraft -f
 ```
 
+`mc install` has to run as `minecraft`, not as you: it writes `server/` and `backups/`, and the
+unit starts the server as the same user. Run later maintenance the same way, e.g.
+`sudo -u minecraft /opt/minecraft/mc backup`.
+
 `mc start` traps `SIGTERM` and turns it into a console `stop`, and the unit sets
 `KillMode=mixed`, so `systemctl stop` saves the world instead of killing it. `TimeoutStopSec` is
-180s to allow for a large save.
+180s to allow for a large save. `systemctl reload minecraft` sends Paper's `reload` (plugins and
+config, in place); for a full restart that keeps the world use
+`sudo -u minecraft /opt/minecraft/mc restart`.
 
 To run as your own user instead, drop the `User=`/`Group=` lines and install the unit as that
 user.
@@ -158,7 +168,7 @@ The container's `mem_limit` is what the JVM sees as system memory, so keep it co
 
 ## Cross-play notes
 
-- Both plugins ship preconfigured. Geyser finds Floodgate's key automatically, so there is no
+- Floodgate generates its key pair on first run and Geyser finds it automatically, so there is no
   manual key copying — do not hand-edit `server/plugins/*/key.pem`.
 - Bedrock usernames are prefixed with `.` to avoid colliding with Java names. Players appear as
   `.Steve` in chat and `mc console list`.

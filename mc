@@ -26,7 +26,7 @@ Commands
   stop             Ask a running server to shut down
   restart          stop, then start
   status           Report whether the server is up, plus memory settings
-  logs [n]         Tail the latest server log (default 50 lines)
+  logs [-f] [n]    Print the last n lines of the server log (default 50; -f to follow)
   console <cmd>    Send a command to the running server, e.g. `mc console op Steve`
   backup           Stop-and-zip a consistent snapshot into backups/
   update [--apply] Show newer Paper/Geyser/Floodgate builds; --apply re-pins
@@ -74,7 +74,11 @@ fetch_jar() {
   dim "$url"
 
   local tmp="$dest.part"
-  if ! curl -fSL --retry 3 --retry-delay 2 -o "$tmp" "$url"; then
+  # curl's progress meter is one line of carriage returns per update, which is
+  # unreadable in a systemd journal or `docker logs`. Only show it to a terminal.
+  local meter=(-sS)
+  [[ -t 1 ]] && meter=(--progress-bar)
+  if ! curl -fSL --retry 3 --retry-delay 2 "${meter[@]}" -o "$tmp" "$url"; then
     rm -f "$tmp"
     die "download failed for $label"
   fi
@@ -236,11 +240,29 @@ cmd_status() {
 }
 
 cmd_logs() {
-  local lines="${1:-50}"
+  local follow=0 lines=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--follow) follow=1; shift ;;
+      -*)           die "unknown option for mc logs: $1" ;;
+      *)
+        [[ -z "$lines" ]] || die "usage: mc logs [-f] [lines]"
+        lines="$1"
+        shift
+        ;;
+    esac
+  done
+
   local log_file="$SERVER_DIR/logs/latest.log"
   [[ -f "$log_file" ]] || die "no log yet at $log_file. Has the server ever started?"
-  dim "following $log_file — Ctrl-C to stop"
-  tail -n "$lines" -f "$log_file"
+
+  # Snapshot by default so `mc logs` can be used in a script; -f to stream.
+  if (( follow )); then
+    dim "following $log_file — Ctrl-C to stop"
+    tail -n "${lines:-50}" -f "$log_file"
+  else
+    tail -n "${lines:-50}" "$log_file"
+  fi
 }
 
 cmd_console() {
