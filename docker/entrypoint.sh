@@ -22,6 +22,14 @@ MC_BACKUP_DIR="${MC_BACKUP_DIR:-$APP_DIR/backups}"
 # MC_DROPPED guards the re-exec: if gosu ever handed back a still-privileged
 # process we would otherwise loop forever chowning our own image.
 if [[ "$(id -u)" == "0" && "${MC_DROPPED:-0}" != "1" ]]; then
+  # gosu ships in the image. Running as root on a host means you invoked the
+  # container entrypoint by hand, which is not what it is for.
+  if ! command -v gosu >/dev/null 2>&1; then
+    echo " err gosu is not installed -- this entrypoint is for the container image." >&2
+    echo "     On a host, run ./mc directly. See README." >&2
+    exit 1
+  fi
+
   for dir in "$MC_SERVER_DIR" "$MC_BACKUP_DIR"; do
     mkdir -p "$dir"
     chown "$MC_USER":"$MC_USER" "$dir" 2>/dev/null \
