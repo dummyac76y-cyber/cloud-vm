@@ -1,0 +1,11 @@
+node_modules/
+dist/
+data/
+backups/
+*.log
+.env
+.env.*
+!.env.example
+.DS_Store
+coverage/
+scripts/browser-qa.mjs

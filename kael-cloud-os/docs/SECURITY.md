@@ -1,0 +1,11 @@
+# Security design
+- The server binds to 127.0.0.1 by default; it is **not** a remotely hosted service.
+- For future remote access, use a separately approved identity-aware HTTPS tunnel, with a second authorization boundary.
+- A random 256-bit key is created on the first run in data/.access-key (mode 0600). It is never committed or sent to logs.
+- API endpoints require Authorization: Bearer <key>. Requests with an Origin from an unapproved host are rejected.
+- The file explorer is read-only and scoped to the application's workspace folder. No dotfiles, symlinks or traversal are allowed.
+- Tasks are a fixed allowlist: uptime, disk, identity, git status, self-test and build. No arbitrary shell.
+- Tasks have output length, execution time and concurrency limits.
+- Application audit history is stored in SQLite; never log secrets.
+- Do not place VM pairing, account tokens, or unrelated private files in the public GitHub source repository.
+- The application cannot guarantee availability if its host VM is suspended or archived.
